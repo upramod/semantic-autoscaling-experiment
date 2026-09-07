@@ -1,1 +1,110 @@
 
+name: KEDA Semantic Autoscaling Experiment
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_mode:
+        description: "smoke = fast validation, paper = full experiment matrix"
+        required: true
+        default: "smoke"
+        type: choice
+        options:
+          - smoke
+          - paper
+
+permissions:
+  contents: read
+
+jobs:
+  experiment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install kind
+        run: |
+          curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
+          sudo install /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Install kubectl
+        run: |
+          curl -Lo /tmp/kubectl https://dl.k8s.io/release/v1.34.1/bin/linux/amd64/kubectl
+          sudo install /tmp/kubectl /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Install Helm
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm version
+
+      - name: Validate source
+        run: |
+          python -m compileall scaler worker loadgen analysis
+          python -m pip install -r requirements-dev.txt
+          pytest -q
+
+      - name: Create Kubernetes cluster
+        run: ./scripts/kind_create.sh
+
+      - name: Build experiment images
+        run: ./scripts/build_images.sh
+
+      - name: Load images into kind
+        run: ./scripts/kind_load_images.sh
+
+      - name: Install KEDA
+        run: ./scripts/install_keda.sh
+
+      - name: Deploy experiment components
+        run: ./scripts/deploy.sh
+
+      - name: Show cluster state
+        run: |
+          kubectl get nodes -o wide
+          kubectl get pods -A
+          kubectl get crd scaledobjects.keda.sh
+
+      - name: Run smoke experiment
+        if: ${{ inputs.run_mode == 'smoke' }}
+        env:
+          DURATION: "90"
+        run: |
+          ./scripts/run_experiment.sh baseline composition 1
+          ./scripts/run_experiment.sh semantic composition 1
+          python analysis/aggregate.py results
+
+      - name: Run paper experiment matrix
+        if: ${{ inputs.run_mode == 'paper' }}
+        env:
+          DURATION: "180"
+          SEEDS: "1 2 3"
+        run: ./scripts/run_matrix.sh
+
+      - name: Capture final Kubernetes diagnostics
+        if: always()
+        run: |
+          mkdir -p results/diagnostics
+          kubectl get all -A -o wide > results/diagnostics/all-resources.txt 2>&1 || true
+          kubectl get scaledobjects,hpa -n semantic-scaling -o yaml > results/diagnostics/scaling.yaml 2>&1 || true
+          kubectl describe pods -n semantic-scaling > results/diagnostics/pods.txt 2>&1 || true
+          kubectl logs -n keda deployment/keda-operator --tail=2000 > results/diagnostics/keda-operator.log 2>&1 || true
+          kubectl logs -n semantic-scaling deployment/semantic-external-scaler --tail=2000 > results/diagnostics/scaler-final.log 2>&1 || true
+
+      - name: Upload experiment results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semantic-autoscaling-${{ inputs.run_mode }}-results
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30
