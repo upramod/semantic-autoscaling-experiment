@@ -1,0 +1,27 @@
+GITHUB UPLOAD INSTRUCTIONS
+
+1. Extract this ZIP.
+2. Open:
+   https://github.com/upramod/semantic-autoscaling-experiment
+3. Click Add file -> Upload files.
+4. Drag ALL contents of the extracted folder into the upload area.
+   Include the .github folder.
+5. Click Commit changes.
+6. Open the Actions tab.
+7. Select "KEDA Semantic Autoscaling Experiment".
+8. Click "Run workflow".
+9. Choose "smoke" first and run it.
+
+The smoke run performs two real Kubernetes/KEDA experiments:
+- queue-depth baseline
+- semantic-cost hybrid
+using the composition-shift workload.
+
+When it finishes, download the artifact named:
+semantic-autoscaling-smoke-results
+
+Send that ZIP back to ChatGPT. After the smoke run is validated, run "paper"
+to execute the full 24-run matrix: 2 policies x 4 scenarios x 3 seeds.
+
+No local Docker, Kubernetes, Helm, kind, kubectl, or Python installation is required.
+GitHub Actions installs the required tooling on the cloud runner.
