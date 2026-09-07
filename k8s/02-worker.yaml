@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: semantic-scaling
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: worker}
+  template:
+    metadata:
+      labels: {app: worker}
+    spec:
+      containers:
+      - name: worker
+        image: semantic-worker:local
+        imagePullPolicy: IfNotPresent
+        env:
+        - {name: REDIS_HOST, value: redis}
+        - {name: WORK_LIST, value: work}
+        - {name: RESULT_LIST, value: results}
+        resources:
+          requests: {cpu: 250m, memory: 96Mi}
+          limits: {cpu: 500m, memory: 256Mi}

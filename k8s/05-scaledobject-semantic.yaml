@@ -1,0 +1,44 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-scaling
+  namespace: semantic-scaling
+spec:
+  scaleTargetRef:
+    name: worker
+  pollingInterval: 15
+  cooldownPeriod: 60
+  minReplicaCount: 2
+  maxReplicaCount: 50
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+          - {type: Percent, value: 100, periodSeconds: 15}
+          - {type: Pods, value: 8, periodSeconds: 15}
+          selectPolicy: Max
+        scaleDown:
+          stabilizationWindowSeconds: 60
+          policies:
+          - {type: Percent, value: 50, periodSeconds: 30}
+  triggers:
+  # Safety floor. Semantic estimation can only increase the HPA recommendation.
+  - type: redis
+    name: queue-count
+    metadata:
+      address: redis.semantic-scaling.svc.cluster.local:6379
+      listName: work
+      listLength: "6"
+      activationListLength: "1"
+  - type: external
+    name: semantic-cost
+    metadata:
+      scalerAddress: semantic-external-scaler.semantic-scaling.svc.cluster.local:9090
+      redisAddress: redis.semantic-scaling.svc.cluster.local:6379
+      listName: work
+      metricName: semantic_work_backlog
+      sampleSize: "64"
+      targetWork: "8.0"
+      estimator: metadata

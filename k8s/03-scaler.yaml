@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: semantic-external-scaler
+  namespace: semantic-scaling
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: semantic-external-scaler}
+  template:
+    metadata:
+      labels: {app: semantic-external-scaler}
+    spec:
+      containers:
+      - name: scaler
+        image: semantic-external-scaler:local
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9090
+          name: grpc
+        env:
+        - {name: REDIS_ADDRESS, value: "redis:6379"}
+        - {name: ESTIMATOR, value: metadata}
+        resources:
+          requests: {cpu: 100m, memory: 96Mi}
+          limits: {cpu: 500m, memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: semantic-external-scaler
+  namespace: semantic-scaling
+spec:
+  selector: {app: semantic-external-scaler}
+  ports:
+  - name: grpc
+    port: 9090
+    targetPort: 9090
