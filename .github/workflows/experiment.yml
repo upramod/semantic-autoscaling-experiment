@@ -2,6 +2,11 @@ name: KEDA Semantic Autoscaling Smoke Test
 
 "on":
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/experiment.yml
 
 permissions:
   contents: read
@@ -78,12 +83,17 @@ jobs:
           mkdir -p results/diagnostics
           kubectl get all -A -o wide > results/diagnostics/all-resources.txt 2>&1 || true
           kubectl get scaledobjects,hpa -A -o yaml > results/diagnostics/scaling.yaml 2>&1 || true
+          kubectl get jobs -n semantic-scaling -o yaml > results/diagnostics/jobs.yaml 2>&1 || true
           kubectl get pods -n semantic-scaling -o yaml > results/diagnostics/pods.yaml 2>&1 || true
           kubectl describe pods -n semantic-scaling > results/diagnostics/pods-describe.txt 2>&1 || true
           kubectl logs -n semantic-scaling deployment/worker --all-pods=true --tail=-1 > results/diagnostics/worker-current.log 2>&1 || true
           for pod in $(kubectl get pods -n semantic-scaling -l app=worker -o name 2>/dev/null); do
             name=${pod#pod/}
             kubectl logs -n semantic-scaling "$name" --previous --tail=-1 >> results/diagnostics/worker-previous.log 2>&1 || true
+          done
+          for pod in $(kubectl get pods -n semantic-scaling -l job-name=loadgen -o name 2>/dev/null); do
+            name=${pod#pod/}
+            kubectl logs -n semantic-scaling "$name" --tail=-1 >> results/diagnostics/loadgen.log 2>&1 || true
           done
           kubectl logs -n semantic-scaling deployment/semantic-external-scaler --tail=-1 > results/diagnostics/scaler.log 2>&1 || true
           kubectl logs -n keda deployment/keda-operator --tail=2000 > results/diagnostics/keda-operator.log 2>&1 || true
