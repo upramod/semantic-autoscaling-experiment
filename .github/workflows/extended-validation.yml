@@ -1,0 +1,201 @@
+name: KEDA Metadata-Weighted Extended Validation
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/extended-validation.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: metadata-weighted-extended-validation
+  cancel-in-progress: false
+
+jobs:
+  experiment:
+    strategy:
+      fail-fast: false
+      matrix:
+        policy: [baseline, cpu, weighted]
+        scenario: [steady, composition, volume, mixed]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install kind
+        run: |
+          curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
+          sudo install /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Install kubectl
+        run: |
+          curl -Lo /tmp/kubectl https://dl.k8s.io/release/v1.34.1/bin/linux/amd64/kubectl
+          sudo install /tmp/kubectl /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Install Helm
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm version
+
+      - name: Validate source
+        run: |
+          python -m compileall scaler worker loadgen analysis
+          python -m pip install -r requirements-dev.txt
+          pytest -q
+
+      - name: Create Kubernetes cluster
+        run: bash scripts/kind_create.sh
+
+      - name: Build experiment images
+        run: bash scripts/build_images.sh
+
+      - name: Load images into kind
+        run: bash scripts/kind_load_images.sh
+
+      - name: Install KEDA
+        run: bash scripts/install_keda.sh
+
+      - name: Install metrics server
+        run: |
+          helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
+          helm repo update
+          cat >/tmp/metrics-server-values.yaml <<'EOF'
+          args:
+            - --cert-dir=/tmp
+            - --secure-port=10250
+            - --kubelet-preferred-address-types=InternalIP,Hostname
+            - --kubelet-use-node-status-port
+            - --metric-resolution=15s
+            - --kubelet-insecure-tls
+          EOF
+          helm upgrade --install metrics-server metrics-server/metrics-server \
+            --namespace kube-system \
+            -f /tmp/metrics-server-values.yaml \
+            --wait --timeout 3m
+          kubectl rollout status deployment/metrics-server -n kube-system --timeout=180s
+          for i in $(seq 1 36); do
+            if kubectl top nodes >/dev/null 2>&1; then
+              kubectl top nodes
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "metrics API did not become ready" >&2
+          kubectl logs -n kube-system deployment/metrics-server --tail=200 || true
+          exit 1
+
+      - name: Deploy experiment components
+        run: bash scripts/deploy.sh
+
+      - name: Capture environment metadata
+        env:
+          POLICY: ${{ matrix.policy }}
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          mkdir -p results/validation
+          {
+            echo "policy=${POLICY}"
+            echo "scenario=${SCENARIO}"
+            echo "github_run_id=${GITHUB_RUN_ID}"
+            echo "github_sha=${GITHUB_SHA}"
+            echo "runner_os=${RUNNER_OS}"
+            echo "runner_arch=${RUNNER_ARCH}"
+            echo "date_utc=$(date -u --iso-8601=seconds)"
+            echo
+            uname -a
+            echo
+            nproc
+            echo
+            free -h
+            echo
+            lscpu
+            echo
+            kubectl get nodes -o wide
+            echo
+            kubectl top nodes
+            echo
+            kubectl version
+            echo
+            helm version
+            echo
+            kind version
+          } > "results/validation/environment-${POLICY}-${SCENARIO}.txt" 2>&1
+
+      - name: Run five-seed ten-minute validation
+        env:
+          SEEDS: "1 2 3 4 5"
+          DURATION: "600"
+          DRAIN_TIMEOUT: "900"
+        run: bash scripts/run_validation_combo.sh "${{ matrix.policy }}" "${{ matrix.scenario }}"
+
+      - name: Capture diagnostics
+        if: always()
+        env:
+          POLICY: ${{ matrix.policy }}
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          DIR="results/validation/diagnostics-${POLICY}-${SCENARIO}"
+          mkdir -p "$DIR"
+          kubectl get all -A -o wide > "$DIR/all-resources.txt" 2>&1 || true
+          kubectl get scaledobjects,hpa -A -o yaml > "$DIR/scaling.yaml" 2>&1 || true
+          kubectl top nodes > "$DIR/top-nodes.txt" 2>&1 || true
+          kubectl top pods -A > "$DIR/top-pods.txt" 2>&1 || true
+          kubectl describe hpa -n semantic-scaling > "$DIR/hpa-describe.txt" 2>&1 || true
+          kubectl logs -n semantic-scaling deployment/semantic-external-scaler --tail=-1 > "$DIR/scaler.log" 2>&1 || true
+          kubectl logs -n keda deployment/keda-operator --tail=3000 > "$DIR/keda-operator.log" 2>&1 || true
+          kubectl logs -n kube-system deployment/metrics-server --tail=1000 > "$DIR/metrics-server.log" 2>&1 || true
+
+      - name: Upload validation shard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-${{ matrix.policy }}-${{ matrix.scenario }}
+          path: results/validation/
+          if-no-files-found: error
+          retention-days: 30
+
+  aggregate:
+    needs: experiment
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download validation shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: validation-*
+          path: results/validation
+          merge-multiple: true
+
+      - name: Aggregate validation results
+        run: |
+          python analysis/aggregate_validation.py results/validation | tee results/validation/aggregate-output.json
+
+      - name: Upload aggregate
+        uses: actions/upload-artifact@v4
+        with:
+          name: metadata-weighted-validation-aggregate
+          path: results/validation/
+          if-no-files-found: error
+          retention-days: 30
