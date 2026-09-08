@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import signal
 import socket
 import time
 
@@ -15,6 +16,8 @@ WORK_LIST = os.getenv("WORK_LIST", "work")
 RESULT_LIST = os.getenv("RESULT_LIST", "results")
 POD = os.getenv("HOSTNAME", socket.gethostname())
 
+shutdown_requested = False
+
 r = redis.Redis(
     host=REDIS_HOST,
     port=REDIS_PORT,
@@ -22,6 +25,25 @@ r = redis.Redis(
     socket_connect_timeout=3,
     socket_timeout=10,
 )
+
+
+def request_shutdown(signum, _frame):
+    global shutdown_requested
+    shutdown_requested = True
+    print(
+        json.dumps(
+            {
+                "event": "shutdown_requested",
+                "pod": POD,
+                "signal": signum,
+            }
+        ),
+        flush=True,
+    )
+
+
+signal.signal(signal.SIGTERM, request_shutdown)
+signal.signal(signal.SIGINT, request_shutdown)
 
 
 def wait_for_redis():
@@ -173,7 +195,11 @@ def main():
         flush=True,
     )
 
-    while True:
+    # A scale-down sends SIGTERM. Once a worker has removed an item from the
+    # Redis list, it must finish that item and publish its result before exit.
+    # The shutdown handler therefore stops new BLPOP calls but does not abort
+    # an in-flight process_message call.
+    while not shutdown_requested:
         try:
             item = r.blpop(WORK_LIST, timeout=5)
 
@@ -210,6 +236,16 @@ def main():
             )
 
             time.sleep(1)
+
+    print(
+        json.dumps(
+            {
+                "event": "worker_stopped",
+                "pod": POD,
+            }
+        ),
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

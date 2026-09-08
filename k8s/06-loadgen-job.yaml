@@ -18,3 +18,4 @@ spec:
         - --duration=180
         - --seed=1
         - --output=/tmp/run.csv
+        - --drain-timeout=900

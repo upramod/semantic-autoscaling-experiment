@@ -5,8 +5,15 @@ POLICY=${1:-baseline}       # baseline | semantic
 SCENARIO=${2:-composition} # steady | composition | volume | mixed
 SEED=${3:-1}
 DURATION=${DURATION:-180}
+DRAIN_TIMEOUT=${DRAIN_TIMEOUT:-900}
 OUTDIR="$ROOT/results/${POLICY}_${SCENARIO}_seed${SEED}"
 mkdir -p "$OUTDIR"
+
+capture_run_state() {
+  kubectl exec -n semantic-scaling deployment/redis -- redis-cli --raw GET experiment:last_csv > "$OUTDIR/requests.csv" 2>/dev/null || true
+  kubectl logs -n semantic-scaling deployment/semantic-external-scaler > "$OUTDIR/scaler.log" 2>&1 || true
+  kubectl get hpa -n semantic-scaling -o yaml > "$OUTDIR/hpa.yaml" 2>&1 || true
+}
 
 kubectl delete scaledobject worker-scaling -n semantic-scaling --ignore-not-found
 kubectl wait --for=delete hpa/keda-hpa-worker-scaling -n semantic-scaling --timeout=60s >/dev/null 2>&1 || true
@@ -30,10 +37,11 @@ sed \
   -e "s/--scenario=composition/--scenario=${SCENARIO}/" \
   -e "s/--duration=180/--duration=${DURATION}/" \
   -e "s/--seed=1/--seed=${SEED}/" \
+  -e "s/--drain-timeout=900/--drain-timeout=${DRAIN_TIMEOUT}/" \
   "$ROOT/k8s/06-loadgen-job.yaml" | kubectl apply -f -
 
 # Wait for the Job to complete, but fail fast if the pod terminates with an error.
-DEADLINE=$((SECONDS + 1200))
+DEADLINE=$((SECONDS + DURATION + DRAIN_TIMEOUT + 120))
 while true; do
   COMPLETE=$(kubectl get job loadgen -n semantic-scaling -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)
   FAILED=$(kubectl get job loadgen -n semantic-scaling -o jsonpath='{.status.failed}' 2>/dev/null || true)
@@ -47,6 +55,7 @@ while true; do
     if [[ -n "$POD" ]]; then
       kubectl logs -n semantic-scaling "$POD" | tee "$OUTDIR/loadgen.log" >&2 || true
     fi
+    capture_run_state
     echo "loadgen job failed" >&2
     exit 1
   fi
@@ -56,6 +65,7 @@ while true; do
     if [[ -n "$POD" ]]; then
       kubectl logs -n semantic-scaling "$POD" | tee "$OUTDIR/loadgen.log" >&2 || true
     fi
+    capture_run_state
     echo "timed out waiting for loadgen" >&2
     exit 1
   fi

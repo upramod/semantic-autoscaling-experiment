@@ -11,6 +11,7 @@ spec:
     metadata:
       labels: {app: worker}
     spec:
+      terminationGracePeriodSeconds: 60
       containers:
       - name: worker
         image: semantic-worker:local

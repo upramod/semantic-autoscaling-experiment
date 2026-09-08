@@ -7,6 +7,14 @@ name: KEDA Semantic Autoscaling Smoke Test
       - main
     paths:
       - .github/workflows/experiment.yml
+      - worker/**
+      - scaler/**
+      - loadgen/**
+      - k8s/**
+      - scripts/**
+      - analysis/**
+      - tests/**
+      - requirements-dev.txt
 
 permissions:
   contents: read
@@ -72,6 +80,7 @@ jobs:
       - name: Run smoke experiment
         env:
           DURATION: "90"
+          DRAIN_TIMEOUT: "180"
         run: |
           bash scripts/run_experiment.sh baseline composition 1
           bash scripts/run_experiment.sh semantic composition 1
