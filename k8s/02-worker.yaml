@@ -17,6 +17,7 @@ spec:
         imagePullPolicy: IfNotPresent
         env:
         - {name: REDIS_HOST, value: redis}
+        - {name: WORKER_REDIS_PORT, value: "6379"}
         - {name: WORK_LIST, value: work}
         - {name: RESULT_LIST, value: results}
         resources:
