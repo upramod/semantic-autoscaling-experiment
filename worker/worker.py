@@ -7,7 +7,10 @@ import time
 import redis
 
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+# Kubernetes automatically injects REDIS_PORT=tcp://<service-ip>:6379 for a
+# Service named "redis". Use a worker-specific variable so that service
+# discovery environment variables cannot collide with the numeric port.
+REDIS_PORT = int(os.getenv("WORKER_REDIS_PORT", "6379"))
 WORK_LIST = os.getenv("WORK_LIST", "work")
 RESULT_LIST = os.getenv("RESULT_LIST", "results")
 POD = os.getenv("HOSTNAME", socket.gethostname())
@@ -152,6 +155,7 @@ def main():
                 "event": "worker_starting",
                 "pod": POD,
                 "redis_host": REDIS_HOST,
+                "redis_port": REDIS_PORT,
             }
         ),
         flush=True,
@@ -194,8 +198,6 @@ def main():
             time.sleep(2)
 
         except Exception as exc:
-            # Keep the worker alive and expose unexpected failures
-            # instead of letting Kubernetes enter CrashLoopBackOff.
             print(
                 json.dumps(
                     {
