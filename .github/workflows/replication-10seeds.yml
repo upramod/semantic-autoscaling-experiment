@@ -1,0 +1,127 @@
+name: KEDA Semantic Autoscaling 10-Seed Replication
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/replication-10seeds.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: semantic-autoscaling-replication-10seeds
+  cancel-in-progress: false
+
+jobs:
+  experiment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install kind
+        run: |
+          curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
+          sudo install /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Install kubectl
+        run: |
+          curl -Lo /tmp/kubectl https://dl.k8s.io/release/v1.34.1/bin/linux/amd64/kubectl
+          sudo install /tmp/kubectl /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Install Helm
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm version
+
+      - name: Validate source
+        run: |
+          python -m compileall scaler worker loadgen analysis
+          python -m pip install -r requirements-dev.txt
+          pytest -q
+
+      - name: Create Kubernetes cluster
+        run: bash scripts/kind_create.sh
+
+      - name: Build experiment images
+        run: bash scripts/build_images.sh
+
+      - name: Load images into kind
+        run: bash scripts/kind_load_images.sh
+
+      - name: Install KEDA
+        run: bash scripts/install_keda.sh
+
+      - name: Deploy experiment components
+        run: bash scripts/deploy.sh
+
+      - name: Capture environment metadata
+        run: |
+          mkdir -p results
+          {
+            echo "experiment=10-seed replication"
+            echo "seeds=1..10"
+            echo "duration_seconds=120"
+            echo "github_run_id=${GITHUB_RUN_ID}"
+            echo "github_sha=${GITHUB_SHA}"
+            echo "runner_os=${RUNNER_OS}"
+            echo "runner_arch=${RUNNER_ARCH}"
+            echo "date_utc=$(date -u --iso-8601=seconds)"
+            echo
+            uname -a
+            echo
+            nproc
+            echo
+            free -h
+            echo
+            lscpu
+            echo
+            kubectl get nodes -o wide
+            echo
+            kubectl version
+            echo
+            helm version
+            echo
+            kind version
+          } > results/environment.txt 2>&1
+
+      - name: Run 10-seed replication matrix
+        env:
+          SEEDS: "1 2 3 4 5 6 7 8 9 10"
+          DURATION: "120"
+          DRAIN_TIMEOUT: "300"
+        run: bash scripts/run_matrix.sh
+
+      - name: Capture final diagnostics
+        if: always()
+        run: |
+          mkdir -p results/diagnostics
+          kubectl get all -A -o wide > results/diagnostics/all-resources.txt 2>&1 || true
+          kubectl get scaledobjects,hpa -A -o yaml > results/diagnostics/scaling.yaml 2>&1 || true
+          kubectl get jobs -n semantic-scaling -o yaml > results/diagnostics/jobs.yaml 2>&1 || true
+          kubectl get pods -n semantic-scaling -o yaml > results/diagnostics/pods.yaml 2>&1 || true
+          kubectl describe pods -n semantic-scaling > results/diagnostics/pods-describe.txt 2>&1 || true
+          kubectl logs -n semantic-scaling deployment/worker --all-pods=true --tail=-1 > results/diagnostics/worker-current.log 2>&1 || true
+          kubectl logs -n semantic-scaling deployment/semantic-external-scaler --tail=-1 > results/diagnostics/scaler.log 2>&1 || true
+          kubectl logs -n keda deployment/keda-operator --tail=5000 > results/diagnostics/keda-operator.log 2>&1 || true
+
+      - name: Upload replication results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semantic-autoscaling-replication-10seeds
+          path: results/
+          if-no-files-found: error
+          retention-days: 30
