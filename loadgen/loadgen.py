@@ -26,23 +26,23 @@ def choose(rng, mix):
     return next(reversed(mix))
 
 
-def profile(scenario, elapsed, duration):
+def profile(scenario, elapsed, duration, base_rate=4.0, burst_rate=7.0):
     burst_start = duration / 3
     burst_end = 2 * duration / 3
     in_burst = burst_start <= elapsed < burst_end
     if scenario == "steady":
-        return 4.0, BASE_MIX
+        return base_rate, BASE_MIX
     if scenario == "composition":
-        return 4.0, HEAVY_MIX if in_burst else BASE_MIX
+        return base_rate, HEAVY_MIX if in_burst else BASE_MIX
     if scenario == "volume":
-        return (7.0 if in_burst else 4.0), BASE_MIX
+        return (burst_rate if in_burst else base_rate), BASE_MIX
     if scenario == "mixed":
-        return (7.0 if in_burst else 4.0), (HEAVY_MIX if in_burst else BASE_MIX)
+        return (burst_rate if in_burst else base_rate), (HEAVY_MIX if in_burst else BASE_MIX)
     raise ValueError(scenario)
 
 
-def sample_job(rng, scenario, elapsed, duration):
-    rate, mix = profile(scenario, elapsed, duration)
+def sample_job(rng, scenario, elapsed, duration, base_rate=4.0, burst_rate=7.0):
+    rate, mix = profile(scenario, elapsed, duration, base_rate, burst_rate)
     kind = choose(rng, mix)
     median = SIZE_MEDIAN[kind]
     size_kb = rng.lognormvariate(math.log(median), 0.65)
@@ -70,6 +70,8 @@ def main():
     ap.add_argument("--scenario", choices=["steady", "composition", "volume", "mixed"], default="composition")
     ap.add_argument("--duration", type=int, default=180)
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--base-rate", type=float, default=4.0)
+    ap.add_argument("--burst-rate", type=float, default=7.0)
     ap.add_argument("--output", default="/results/run.csv")
     ap.add_argument("--drain-timeout", type=int, default=900)
     args = ap.parse_args()
@@ -91,10 +93,14 @@ def main():
         if now < next_tick:
             time.sleep(min(0.05, next_tick - now))
             continue
-        rate, _, _, _ = sample_job(rng, args.scenario, elapsed, args.duration)
+        rate, _, _, _ = sample_job(
+            rng, args.scenario, elapsed, args.duration, args.base_rate, args.burst_rate
+        )
         count = poisson_knuth(rng, rate)
         for _ in range(count):
-            _, kind, size_kb, service_s = sample_job(rng, args.scenario, elapsed, args.duration)
+            _, kind, size_kb, service_s = sample_job(
+                rng, args.scenario, elapsed, args.duration, args.base_rate, args.burst_rate
+            )
             job = {
                 "id": str(uuid.uuid4()),
                 "kind": kind,
@@ -122,7 +128,17 @@ def main():
     csv_text = buf.getvalue()
     # Persist through Redis so results remain available after this Kubernetes Job exits.
     client.set("experiment:last_csv", csv_text, ex=86400)
-    client.set("experiment:last_meta", json.dumps({"scenario": args.scenario, "seed": args.seed, "sent": sent}), ex=86400)
+    client.set(
+        "experiment:last_meta",
+        json.dumps({
+            "scenario": args.scenario,
+            "seed": args.seed,
+            "sent": sent,
+            "base_rate": args.base_rate,
+            "burst_rate": args.burst_rate,
+        }),
+        ex=86400,
+    )
 
     # Also write locally when the load generator is run outside Kubernetes.
     out = Path(args.output)
@@ -137,6 +153,8 @@ def main():
         "seed": args.seed,
         "sent": sent,
         "completed": len(rows),
+        "base_rate": args.base_rate,
+        "burst_rate": args.burst_rate,
         "output": str(out),
         "queue_remaining": client.llen(work),
     }
