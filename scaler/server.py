@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 from concurrent import futures
 
 import grpc
@@ -51,6 +52,7 @@ class SemanticExternalScaler(pb_grpc.ExternalScalerServicer):
         )
 
     def GetMetrics(self, request, context):
+        started = time.perf_counter()
         ref = request.scaledObjectRef
         client = _redis_client(ref)
         list_name = _meta(ref, "listName", "work")
@@ -59,21 +61,26 @@ class SemanticExternalScaler(pb_grpc.ExternalScalerServicer):
         metric_name = request.metricName or _meta(ref, "metricName", "semantic_work_backlog")
 
         queue_len = client.llen(list_name)
+        sampled = 0
         if queue_len <= 0:
             total_work = 0.0
         else:
             n = min(sample_size, queue_len)
+            sampled = n
             raw = client.lrange(list_name, 0, n - 1)
             estimates = self._estimator(estimator_name).estimate(raw)
             mean_cost = sum(estimates) / len(estimates) if estimates else 0.0
             # Estimate total outstanding work from a bounded head sample.
             total_work = float(queue_len) * mean_cost
 
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
         LOG.info(json.dumps({
             "metric": metric_name,
             "queue_len": int(queue_len),
+            "sampled_items": int(sampled),
             "estimated_work_seconds": round(total_work, 3),
             "estimator": estimator_name,
+            "get_metrics_ms": round(elapsed_ms, 4),
         }))
         return pb.GetMetricsResponse(
             metricValues=[pb.MetricValue(metricName=metric_name, metricValueFloat=total_work)]
