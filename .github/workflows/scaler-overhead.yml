@@ -1,0 +1,139 @@
+name: KEDA External Scaler Overhead Profile
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/scaler-overhead.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: metadata-weighted-scaler-overhead
+  cancel-in-progress: false
+
+jobs:
+  overhead:
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        seed: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install kind
+        run: |
+          curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
+          sudo install /tmp/kind /usr/local/bin/kind
+
+      - name: Install kubectl
+        run: |
+          curl -Lo /tmp/kubectl https://dl.k8s.io/release/v1.34.1/bin/linux/amd64/kubectl
+          sudo install /tmp/kubectl /usr/local/bin/kubectl
+
+      - name: Install Helm
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Validate source
+        run: |
+          python -m compileall scaler worker loadgen analysis
+          python -m pip install -r requirements-dev.txt
+          pytest -q
+
+      - name: Build images and create cluster
+        run: |
+          bash scripts/build_images.sh
+          bash scripts/kind_create.sh
+          bash scripts/kind_load_images.sh
+          bash scripts/install_keda.sh
+          bash scripts/install_metrics_server.sh
+          bash scripts/deploy.sh
+
+      - name: Run weighted composition workload with overhead profiling
+        env:
+          SEED: ${{ matrix.seed }}
+        run: |
+          DIR="results/overhead/weighted_composition_seed${SEED}"
+          mkdir -p "$DIR"
+          INTERVAL=15 bash scripts/monitor_scaler_resources.sh "$DIR/scaler_resources.csv" &
+          MON_PID=$!
+          trap 'kill "$MON_PID" 2>/dev/null || true' EXIT
+
+          RESULT_ROOT="results/overhead" \
+          DURATION=600 \
+          DRAIN_TIMEOUT=900 \
+          BASE_RATE=2.5 \
+          BURST_RATE=4.0 \
+          bash scripts/run_block_policy.sh weighted composition "$SEED"
+
+          kill "$MON_PID" 2>/dev/null || true
+          trap - EXIT
+          python analysis/analyze_scaler_overhead.py \
+            "$DIR" "$DIR/scaler_resources.csv" "$DIR/scaler.log"
+
+      - name: Final diagnostics
+        if: always()
+        env:
+          SEED: ${{ matrix.seed }}
+        run: |
+          DIR="results/overhead/diagnostics/seed${SEED}"
+          mkdir -p "$DIR"
+          kubectl top pod -n semantic-scaling -l app=semantic-external-scaler --containers > "$DIR/final-top.txt" 2>&1 || true
+          kubectl get pod -n semantic-scaling -l app=semantic-external-scaler -o yaml > "$DIR/scaler-pod.yaml" 2>&1 || true
+          kubectl describe pod -n semantic-scaling -l app=semantic-external-scaler > "$DIR/scaler-pod-describe.txt" 2>&1 || true
+          kind delete cluster --name semantic-scaling || true
+
+      - name: Upload overhead shard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scaler-overhead-seed${{ matrix.seed }}
+          path: results/overhead/
+          if-no-files-found: error
+          retention-days: 30
+
+  aggregate:
+    needs: overhead
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download overhead shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: scaler-overhead-*
+          path: results/overhead
+          merge-multiple: true
+
+      - name: Aggregate overhead profile
+        run: |
+          python analysis/aggregate_scaler_overhead.py results/overhead | tee results/overhead/aggregate-output.json
+
+      - name: Upload aggregate
+        uses: actions/upload-artifact@v4
+        with:
+          name: scaler-overhead-aggregate
+          path: results/overhead/
+          if-no-files-found: error
+          retention-days: 30
