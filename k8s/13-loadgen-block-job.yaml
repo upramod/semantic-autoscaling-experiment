@@ -1,0 +1,23 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: loadgen
+  namespace: semantic-scaling
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: loadgen
+        image: semantic-loadgen:local
+        imagePullPolicy: IfNotPresent
+        args:
+        - --redis-host=redis
+        - --scenario=composition
+        - --duration=600
+        - --seed=1
+        - --base-rate=2.5
+        - --burst-rate=4.0
+        - --output=/tmp/run.csv
+        - --drain-timeout=900

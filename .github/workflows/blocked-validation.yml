@@ -1,0 +1,131 @@
+name: KEDA Host-Matched Blocked Validation
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/blocked-validation.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: metadata-weighted-host-matched-validation
+  cancel-in-progress: false
+
+jobs:
+  block:
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        scenario: [steady, composition, volume, mixed]
+        seed: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install kind
+        run: |
+          curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
+          sudo install /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Install kubectl
+        run: |
+          curl -Lo /tmp/kubectl https://dl.k8s.io/release/v1.34.1/bin/linux/amd64/kubectl
+          sudo install /tmp/kubectl /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Install Helm
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm version
+
+      - name: Validate source
+        run: |
+          python -m compileall scaler worker loadgen analysis
+          python -m pip install -r requirements-dev.txt
+          pytest -q
+
+      - name: Build experiment images once on host
+        run: bash scripts/build_images.sh
+
+      - name: Capture workflow block metadata
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+          SEED: ${{ matrix.seed }}
+        run: |
+          DIR="results/blocked/metadata/${SCENARIO}_seed${SEED}"
+          mkdir -p "$DIR"
+          {
+            echo "github_run_id=${GITHUB_RUN_ID}"
+            echo "github_sha=${GITHUB_SHA}"
+            echo "runner_os=${RUNNER_OS}"
+            echo "runner_arch=${RUNNER_ARCH}"
+            echo "scenario=${SCENARIO}"
+            echo "seed=${SEED}"
+          } > "$DIR/workflow.txt"
+
+      - name: Run host-matched policy block
+        env:
+          DURATION: "600"
+          DRAIN_TIMEOUT: "900"
+          BASE_RATE: "2.5"
+          BURST_RATE: "4.0"
+        run: bash scripts/run_block_job.sh "${{ matrix.scenario }}" "${{ matrix.seed }}"
+
+      - name: Final cleanup
+        if: always()
+        run: kind delete cluster --name semantic-scaling || true
+
+      - name: Upload host block
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blocked-${{ matrix.scenario }}-seed${{ matrix.seed }}
+          path: results/blocked/
+          if-no-files-found: error
+          retention-days: 30
+
+  aggregate:
+    needs: block
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download host blocks
+        uses: actions/download-artifact@v4
+        with:
+          pattern: blocked-*
+          path: results/blocked
+          merge-multiple: true
+
+      - name: Aggregate host-matched results
+        run: |
+          python analysis/aggregate_block.py results/blocked | tee results/blocked/aggregate-output.json
+
+      - name: Upload aggregate
+        uses: actions/upload-artifact@v4
+        with:
+          name: metadata-weighted-host-matched-aggregate
+          path: results/blocked/
+          if-no-files-found: error
+          retention-days: 30
