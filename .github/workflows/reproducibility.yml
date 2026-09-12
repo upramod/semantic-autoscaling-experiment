@@ -15,7 +15,9 @@ jobs:
           python-version: "3.13"
       - name: Compile Python sources
         run: python -m compileall -q scaler worker loadgen analysis
-      - name: Check experiment entry points
+      - name: Validate experiment entry points
         run: |
-          test -x scripts/run_experiment.sh
-          test -x scripts/run_matrix.sh
+          test -f scripts/run_experiment.sh
+          test -f scripts/run_matrix.sh
+          bash -n scripts/run_experiment.sh
+          bash -n scripts/run_matrix.sh
