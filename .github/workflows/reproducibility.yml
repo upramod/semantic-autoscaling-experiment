@@ -1,0 +1,21 @@
+name: Reproducibility checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Compile Python sources
+        run: python -m compileall -q scaler worker loadgen analysis
+      - name: Check experiment entry points
+        run: |
+          test -x scripts/run_experiment.sh
+          test -x scripts/run_matrix.sh
