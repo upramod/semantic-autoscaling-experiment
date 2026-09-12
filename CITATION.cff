@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+title: "Semantic Cost-Aware Autoscaling Prototype"
+message: "If you use this software or its experimental design, please cite this repository and the accompanying manuscript."
+type: software
+authors:
+  - family-names: Ubbala
+    given-names: Pramod
+    orcid: "https://orcid.org/0009-0005-5816-2998"
+repository-code: "https://github.com/upramod/semantic-autoscaling-experiment"
+license: MIT
+date-released: 2026-09-12
+keywords:
+  - Kubernetes
+  - KEDA
+  - autoscaling
+  - heterogeneous workloads
+  - queue-based scaling
+  - workload-aware scaling
